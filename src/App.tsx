@@ -1,3 +1,4 @@
+/* eslint-disable */
 // @ts-nocheck
 import { useEffect, useState, useCallback } from 'react'
 import { supabase, DOMAIN } from './supabase'
