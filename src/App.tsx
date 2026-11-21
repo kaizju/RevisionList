@@ -5,6 +5,7 @@ import { supabase, DOMAIN } from './supabase'
 
 const ROLES = { pm: 'Project Manager', programmer: 'Programmer', documentarian: 'Documenter', analyst: 'Data Analyst' }
 const SINGLE = ['pm', 'programmer']
+const PANELISTS = ['Sheila Orozco', 'Jhonrey Canete', 'Cliff Amadeus Evangelio', 'Marchilyn Abunda']
 const STATUS = { todo: 'To do', doing: 'In progress', done: 'Done' }
 const FINAL = new Date('2026-12-01T23:59:59')
 const today = () => new Date().toISOString().slice(0, 10)
@@ -23,8 +24,7 @@ export default function App() {
       <h1>HopeLine Revision Tracker</h1>
       <p className="sub">Sign in with your @{DOMAIN} account.</p>
       <button className="pri" onClick={() => supabase.auth.signInWithOAuth({
-        provider: 'google', options: { redirectTo: location.origin, queryParams: { hd: DOMAIN }, scopes: 'https://www.googleapis.com/auth/documents' }
-      })}>
+        provider: 'google', options: { redirectTo: location.origin, queryParams: { hd: DOMAIN }, scopes: 'https://www.googleapis.com/auth/documents' } })}>
         Sign in with Google</button>
     </div>)
   if (!session.user.email?.endsWith('@' + DOMAIN)) return (
@@ -50,10 +50,8 @@ function Tracker({ user, token }) {
     setRevs(r.data || []); setPeople(p.data || []); setDocs(d.data || []); setComments(c.data || []); setLoaded(true)
   }, [])
   useEffect(() => {
-    supabase.from('profiles').upsert({
-      id: user.id, email: user.email,
-      full_name: user.user_metadata?.full_name
-    }, { onConflict: 'id', ignoreDuplicates: true }).then(load)
+    supabase.from('profiles').upsert({ id: user.id, email: user.email,
+      full_name: user.user_metadata?.full_name }, { onConflict: 'id', ignoreDuplicates: true }).then(load)
   }, [user, load])
   const me = people.find(p => p.id === user.id)
   const isPM = !!me?.roles?.includes('pm')
@@ -113,7 +111,7 @@ function List({ revs, people, load, comments, uid, isPM }) {
   const shown = revs.filter(r => (!f.part || r.part === f.part) && (!f.status || r.status === f.status) && (!f.mine || myRoles.includes(r.assignee_role)))
   const myRoles = people.find(p => p.id === uid)?.roles || []
   const save = async () => {
-    if (!n.panelist || !n.title) return alert('Enter the panelist and the revision.')
+    if (!n.panelist || !n.title) return alert('Select the panelist and enter the revision.')
     await supabase.from('revisions').insert({ ...n, assignee_role: n.assignee_role || null }); setN(blank); setOpen(false); load()
   }
   const upd = async (id, patch) => { await supabase.from('revisions').update(patch).eq('id', id); load() }
@@ -128,7 +126,8 @@ function List({ revs, people, load, comments, uid, isPM }) {
     {isPM && open && <div className="box form" style={{ marginBottom: 12 }}>
       <select value={n.part} onChange={e => setN({ ...n, part: e.target.value })}>
         <option value="manuscript">Manuscript</option><option value="system">HopeLine System</option></select>
-      <input placeholder="Panelist name" value={n.panelist} onChange={e => setN({ ...n, panelist: e.target.value })} />
+      <select aria-label="Panelist" value={n.panelist} onChange={e => setN({ ...n, panelist: e.target.value })}>
+        <option value="">Select panelist</option>{PANELISTS.map(x => <option key={x} value={x}>{x}</option>)}</select>
       <textarea className="full" placeholder="What the panelist suggested" value={n.title} onChange={e => setN({ ...n, title: e.target.value })} />
       <div className="full">Chapters to change:{' '}{[1, 2, 3, 4, 5].map(c => <label key={c} style={{ marginRight: 10 }}>
         <input type="checkbox" style={{ width: 'auto' }} checked={n.chapters.includes(c)}
@@ -163,11 +162,9 @@ function Chapters({ revs, docs, load, token }) {
     if (!token) return alert('Sign out and sign in again to give Google Docs access.')
     const text = `\nRevision checklist, Chapter ${c} (${today()})\n` + list.map(r =>
       `${r.status === 'done' ? '[x]' : '[ ]'} ${r.title} (${r.panelist}, due ${r.deadline})`).join('\n') + '\n'
-    const res = await fetch(`https://docs.googleapis.com/v1/documents/${id}:batchUpdate`, {
-      method: 'POST',
+    const res = await fetch(`https://docs.googleapis.com/v1/documents/${id}:batchUpdate`, { method: 'POST',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests: [{ insertText: { endOfSegmentLocation: {}, text } }] })
-    })
+      body: JSON.stringify({ requests: [{ insertText: { endOfSegmentLocation: {}, text } }] }) })
     alert(res.ok ? 'Checklist added to the end of the doc.' : `Google refused (${res.status}). Sign in again, or ask your school admin to allow the Docs API.`)
   }
   const titles = ['Introduction', 'Review of Related Literature', 'Methodology', 'Results and Discussion', 'Summary, Conclusion, Recommendations']
@@ -209,10 +206,8 @@ function RolePicker({ user, me, people, load, onDone, canCancel }) {
   const toggle = k => setSel(sel.includes(k) ? sel.filter(x => x !== k) : [...sel, k])
   const save = async () => {
     if (sel.length === 0) return setMsg('Choose at least one role.')
-    const { error } = await supabase.from('profiles').upsert({
-      id: user.id, email: user.email,
-      full_name: user.user_metadata?.full_name, roles: sel
-    })
+    const { error } = await supabase.from('profiles').upsert({ id: user.id, email: user.email,
+      full_name: user.user_metadata?.full_name, roles: sel })
     if (error) { setMsg(error.message); load(); return }
     await load(); onDone()
   }
@@ -220,12 +215,10 @@ function RolePicker({ user, me, people, load, onDone, canCancel }) {
     <h1>Choose your role</h1>
     <p className="sub">You can pick more than one. Project Manager and Programmer can each belong to only one person.</p>
     <div className="box" style={{ textAlign: 'left' }}>
-      {Object.entries(ROLES).map(([k, label]) => {
-        const h = holder(k)
+      {Object.entries(ROLES).map(([k, label]) => { const h = holder(k)
         return (<label key={k} style={{ display: 'block', margin: '8px 0', opacity: h ? 0.5 : 1 }}>
           <input type="checkbox" disabled={!!h} checked={sel.includes(k)} onChange={() => toggle(k)} /> {label}
-          {h && <span className="sub"> (taken by {h.full_name || h.email})</span>}</label>)
-      })}</div>
+          {h && <span className="sub"> (taken by {h.full_name || h.email})</span>}</label>) })}</div>
     {msg && <p className="late">{msg}</p>}
     <div className="tools" style={{ justifyContent: 'center' }}><button className="pri" onClick={save}>Save roles</button>
       {canCancel && <button onClick={onDone}>Cancel</button>}</div></div>)
