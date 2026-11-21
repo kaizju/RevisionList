@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase, DOMAIN } from './supabase'
 
-const ROLES = { pm: 'Project Manager', programmer: 'Programmer', documentarian: 'Documentarian', analyst: 'Data Analyst' }
+const ROLES = { pm: 'Project Manager', programmer: 'Programmer', documentarian: 'Documenter', analyst: 'Data Analyst' }
+const SINGLE = ['pm', 'programmer']
 const STATUS = { todo: 'To do', doing: 'In progress', done: 'Done' }
 const FINAL = new Date('2026-12-01T23:59:59')
 const today = () => new Date().toISOString().slice(0, 10)
@@ -36,6 +37,7 @@ function Tracker({ user, token }) {
   const [tab, setTab] = useState('dashboard')
   const [revs, setRevs] = useState([]); const [people, setPeople] = useState([]); const [docs, setDocs] = useState([])
   const [comments, setComments] = useState([]); const [err, setErr] = useState('')
+  const [loaded, setLoaded] = useState(false); const [editing, setEditing] = useState(false)
   const load = useCallback(async () => {
     const [r, p, d, c] = await Promise.all([
       supabase.from('revisions').select('*').order('deadline'),
@@ -44,14 +46,18 @@ function Tracker({ user, token }) {
       supabase.from('revision_comments').select('*').order('created_at')])
     const e = r.error || p.error || d.error || c.error
     if (e) setErr(e.message)
-    setRevs(r.data || []); setPeople(p.data || []); setDocs(d.data || []); setComments(c.data || [])
+    setRevs(r.data || []); setPeople(p.data || []); setDocs(d.data || []); setComments(c.data || []); setLoaded(true)
   }, [])
   useEffect(() => {
     supabase.from('profiles').upsert({ id: user.id, email: user.email,
       full_name: user.user_metadata?.full_name }, { onConflict: 'id', ignoreDuplicates: true }).then(load)
   }, [user, load])
   const me = people.find(p => p.id === user.id)
+  const isPM = !!me?.roles?.includes('pm')
   const daysLeft = Math.max(0, Math.ceil((FINAL - new Date()) / 864e5))
+
+  if (!loaded) return null
+  if (!me || me.roles.length === 0 || editing) return <RolePicker {...{ user, me, people, load, canCancel: !!me && me.roles.length > 0, onDone: () => setEditing(false) }} />
 
   return (<>
     <header>
@@ -59,20 +65,18 @@ function Tracker({ user, token }) {
       <nav>{[['dashboard', 'Dashboard'], ['list', 'Revision list'], ['chapters', 'Chapters']].map(([k, l]) =>
         <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}</nav>
       <span className="sub">
-        <select aria-label="My role" value={me?.role || 'documentarian'}
-          onChange={async e => { await supabase.from('profiles').update({ role: e.target.value }).eq('id', user.id); load() }}>
-          {Object.entries(ROLES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>{' '}
+        {me.roles.map(k => ROLES[k]).join(' + ')}{' '}<button onClick={() => setEditing(true)}>Change roles</button>{' '}
         <button onClick={() => supabase.auth.signOut()}>Sign out</button></span>
     </header>
     <main>
       {err && <p className="late">Database error: {err}. Did you run supabase/schema.sql?</p>}
-      {tab === 'dashboard' && <Dashboard {...{ revs, people, daysLeft }} />}
-      {tab === 'list' && <List {...{ revs, people, load, comments, uid: user.id }} />}
+      {tab === 'dashboard' && <Dashboard {...{ revs, people, daysLeft, isPM, load }} />}
+      {tab === 'list' && <List {...{ revs, people, load, comments, uid: user.id, isPM }} />}
       {tab === 'chapters' && <Chapters {...{ revs, docs, load, token }} />}
     </main></>)
 }
 
-function Dashboard({ revs, people, daysLeft }) {
+function Dashboard({ revs, people, daysLeft, isPM, load }) {
   const done = revs.filter(r => r.status === 'done').length
   const pct = n => (revs.length ? Math.round((n / revs.length) * 100) : 0)
   return (<>
@@ -81,11 +85,11 @@ function Dashboard({ revs, people, daysLeft }) {
       <div className="bar"><i style={{ width: pct(done) + '%' }} /></div>
       <div>{done} of {revs.length} revisions done ({pct(done)}%), {revs.filter(late).length} overdue</div></div>
     <div className="grid">{Object.entries(ROLES).map(([k, label]) => {
-      const ids = people.filter(p => p.role === k).map(p => p.id)
+      const ids = people.filter(p => p.roles?.includes(k)).map(p => p.id)
       const mine = revs.filter(r => ids.includes(r.assignee))
       const d = mine.filter(r => r.status === 'done').length
       return (<div className="box" key={k}><strong>{label}</strong>
-        <div className="sub">{people.filter(p => p.role === k).map(p => p.full_name || p.email).join(', ') || 'No one yet'}</div>
+        <div className="sub">{people.filter(p => p.roles?.includes(k)).map(p => p.full_name || p.email).join(', ') || 'No one yet'}</div>
         <div className="bar"><i style={{ width: (mine.length ? d / mine.length * 100 : 0) + '%' }} /></div>
         <div>{d}/{mine.length} done{mine.filter(late).length > 0 && <span className="late"> · {mine.filter(late).length} overdue</span>}</div></div>)
     })}</div>
@@ -93,10 +97,13 @@ function Dashboard({ revs, people, daysLeft }) {
       const l = revs.filter(r => r.part === p), d = l.filter(r => r.status === 'done').length
       return (<div className="box" key={p}><strong>{p === 'system' ? 'HopeLine System' : 'Capstone Manuscript'}</strong>
         <div className="bar"><i style={{ width: (l.length ? d / l.length * 100 : 0) + '%' }} /></div><div>{d}/{l.length} done</div></div>)
-    })}</div></>)
+    })}</div>
+    <div className="box"><strong>Team</strong>
+      {people.map(p => <div className="row" key={p.id}><span>{p.full_name || p.email}</span>
+        <span className="sub">{(p.roles || []).map(k => ROLES[k]).join(' + ') || 'No role yet'}</span></div>)}</div></>)
 }
 
-function List({ revs, people, load, comments, uid }) {
+function List({ revs, people, load, comments, uid, isPM }) {
   const [f, setF] = useState({ part: '', status: '', mine: false })
   const [open, setOpen] = useState(false)
   const blank = { part: 'manuscript', panelist: '', title: '', chapters: [], section_note: '', assignee: '', start_date: today(), deadline: '2026-12-01' }
@@ -115,8 +122,8 @@ function List({ revs, people, load, comments, uid }) {
       <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })} aria-label="Status">
         <option value="">Any status</option>{Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
       <label><input type="checkbox" checked={f.mine} onChange={e => setF({ ...f, mine: e.target.checked })} /> Mine only</label>
-      <button className="pri" onClick={() => setOpen(!open)}>Add revision</button></div>
-    {open && <div className="box form" style={{ marginBottom: 12 }}>
+      {isPM && <button className="pri" onClick={() => setOpen(!open)}>Add revision</button>}</div>
+    {isPM && open && <div className="box form" style={{ marginBottom: 12 }}>
       <select value={n.part} onChange={e => setN({ ...n, part: e.target.value })}>
         <option value="manuscript">Manuscript</option><option value="system">HopeLine System</option></select>
       <input placeholder="Panelist name" value={n.panelist} onChange={e => setN({ ...n, panelist: e.target.value })} />
@@ -138,14 +145,18 @@ function List({ revs, people, load, comments, uid }) {
           <Notes rev={r} comments={comments.filter(c => c.revision_id === r.id)} people={people} uid={uid} load={load} /></div>
         <div><select value={r.status} aria-label="Status" onChange={e => upd(r.id, { status: e.target.value })}>
           {Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>{' '}
-          <select value={r.assignee || ''} aria-label="Assignee" onChange={e => upd(r.id, { assignee: e.target.value || null })}>
-            <option value="">Unassigned</option>{people.map(p => <option key={p.id} value={p.id}>{p.full_name || p.email}</option>)}</select>{' '}
-          <button onClick={async () => { if (confirm('Delete this revision?')) { await supabase.from('revisions').delete().eq('id', r.id); load() } }}>Delete</button></div></div>)}</div></>)
+          {isPM && <select value={r.assignee || ''} aria-label="Assignee" onChange={e => upd(r.id, { assignee: e.target.value || null })}>
+            <option value="">Unassigned</option>{people.map(p => <option key={p.id} value={p.id}>{p.full_name || p.email}</option>)}</select>}{' '}
+          {isPM && <button onClick={async () => { if (confirm('Delete this revision?')) { await supabase.from('revisions').delete().eq('id', r.id); load() } }}>Delete</button>}</div></div>)}</div></>)
 }
 
 function Chapters({ revs, docs, load, token }) {
-  const push = async (c, list, url) => {
-    const id = url?.match(/\/d\/([\w-]+)/)?.[1]
+  const url = docs.find(x => x.doc_url)?.doc_url || ''
+  const saveUrl = async v => {
+    await supabase.from('chapter_docs').update({ doc_url: v.trim() }).in('chapter', [1, 2, 3, 4, 5]); load()
+  }
+  const push = async (c, list) => {
+    const id = url.match(/\/d\/([\w-]+)/)?.[1]
     if (!id) return alert('Paste the full Google Doc link first.')
     if (!token) return alert('Sign out and sign in again to give Google Docs access.')
     const text = `\nRevision checklist, Chapter ${c} (${today()})\n` + list.map(r =>
@@ -156,20 +167,22 @@ function Chapters({ revs, docs, load, token }) {
     alert(res.ok ? 'Checklist added to the end of the doc.' : `Google refused (${res.status}). Sign in again, or ask your school admin to allow the Docs API.`)
   }
   const titles = ['Introduction', 'Review of Related Literature', 'Methodology', 'Results and Discussion', 'Summary, Conclusion, Recommendations']
-  return (<>{[1, 2, 3, 4, 5].map(c => {
-    const l = revs.filter(r => r.chapters.includes(c)), d = l.filter(r => r.status === 'done').length
-    const doc = docs.find(x => x.chapter === c)
-    return (<div className="box" key={c} style={{ marginBottom: 12 }}>
-      <strong>Chapter {c}: {titles[c - 1]}</strong>
-      <div className="bar"><i style={{ width: (l.length ? d / l.length * 100 : 0) + '%' }} /></div>
-      <div className="sub">{d}/{l.length} revisions done</div>
-      <div className="tools"><input style={{ flex: 1, minWidth: 220, padding: 6 }} placeholder="Paste Google Doc link" defaultValue={doc?.doc_url || ''}
-        onBlur={async e => { await supabase.from('chapter_docs').update({ doc_url: e.target.value }).eq('chapter', c); load() }} />
-        {doc?.doc_url && l.length > 0 && <button onClick={() => push(c, l, doc.doc_url)}>Add checklist to Doc</button>}
-        {doc?.doc_url && <a href={doc.doc_url} target="_blank" rel="noreferrer"><button>Open in Google Docs</button></a>}</div>
-      {l.map(r => <div className="row" key={r.id}><span>{r.title}{r.section_note && <span className="sub"> · {r.section_note}</span>}</span>
-        <span className={late(r) ? 'late' : 'sub'}>{STATUS[r.status]} · due {r.deadline}</span></div>)}</div>)
-  })}</>)
+  return (<>
+    <div className="box" style={{ marginBottom: 12 }}>
+      <strong>Capstone manuscript (Chapters 1 to 5, one Google Doc)</strong>
+      <div className="tools"><input key={url} style={{ flex: 1, minWidth: 220, padding: 6 }} placeholder="Paste the Google Doc link"
+        defaultValue={url} onBlur={e => { if (e.target.value.trim() !== url) saveUrl(e.target.value) }} />
+        {url && <a href={url} target="_blank" rel="noreferrer"><button>Open in Google Docs</button></a>}</div></div>
+    {[1, 2, 3, 4, 5].map(c => {
+      const l = revs.filter(r => r.chapters.includes(c)), d = l.filter(r => r.status === 'done').length
+      return (<div className="box" key={c} style={{ marginBottom: 12 }}>
+        <strong>Chapter {c}: {titles[c - 1]}</strong>
+        <div className="bar"><i style={{ width: (l.length ? d / l.length * 100 : 0) + '%' }} /></div>
+        <div className="sub">{d}/{l.length} revisions done</div>
+        {url && l.length > 0 && <div className="tools"><button onClick={() => push(c, l)}>Add checklist to Doc</button></div>}
+        {l.map(r => <div className="row" key={r.id}><span>{r.title}{r.section_note && <span className="sub"> · {r.section_note}</span>}</span>
+          <span className={late(r) ? 'late' : 'sub'}>{STATUS[r.status]} · due {r.deadline}</span></div>)}</div>)
+    })}</>)
 }
 
 function Notes({ rev, comments, people, uid, load }) {
@@ -183,4 +196,29 @@ function Notes({ rev, comments, people, uid, load }) {
     {o && <div style={{ marginTop: 6 }}>{comments.map(c => <div key={c.id} className="sub"><strong>{who(c.author)}:</strong> {c.body}</div>)}
       <div className="tools"><input style={{ flex: 1, padding: 6 }} placeholder="Add a note" value={t} onChange={e => setT(e.target.value)} />
         <button className="pri" onClick={add}>Save note</button></div></div>}</div>)
+}
+
+function RolePicker({ user, me, people, load, onDone, canCancel }) {
+  const [sel, setSel] = useState(me?.roles || [])
+  const [msg, setMsg] = useState('')
+  const holder = k => SINGLE.includes(k) ? people.find(p => p.id !== user.id && p.roles?.includes(k)) : null
+  const toggle = k => setSel(sel.includes(k) ? sel.filter(x => x !== k) : [...sel, k])
+  const save = async () => {
+    if (sel.length === 0) return setMsg('Choose at least one role.')
+    const { error } = await supabase.from('profiles').upsert({ id: user.id, email: user.email,
+      full_name: user.user_metadata?.full_name, roles: sel })
+    if (error) { setMsg(error.message); load(); return }
+    await load(); onDone()
+  }
+  return (<div className="login">
+    <h1>Choose your role</h1>
+    <p className="sub">You can pick more than one. Project Manager and Programmer can each belong to only one person.</p>
+    <div className="box" style={{ textAlign: 'left' }}>
+      {Object.entries(ROLES).map(([k, label]) => { const h = holder(k)
+        return (<label key={k} style={{ display: 'block', margin: '8px 0', opacity: h ? 0.5 : 1 }}>
+          <input type="checkbox" disabled={!!h} checked={sel.includes(k)} onChange={() => toggle(k)} /> {label}
+          {h && <span className="sub"> (taken by {h.full_name || h.email})</span>}</label>) })}</div>
+    {msg && <p className="late">{msg}</p>}
+    <div className="tools" style={{ justifyContent: 'center' }}><button className="pri" onClick={save}>Save roles</button>
+      {canCancel && <button onClick={onDone}>Cancel</button>}</div></div>)
 }
